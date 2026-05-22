@@ -51,6 +51,11 @@ export function useCanvas(canvasRef: RefObject<HTMLCanvasElement | null>) {
   const [canUndo, setCanUndo] = useState(false)
   const [canRedo, setCanRedo] = useState(false)
 
+  // Native (full-resolution) dimensions of the composition.
+  // The canvas is scaled down to fit the viewport for display, but we export
+  // at these native dimensions for HD quality output.
+  const nativeSizeRef = useRef<{ width: number; height: number }>({ width: 0, height: 0 })
+
   // Keep a ref to canvas for use inside event callbacks without stale closures
   const canvasInstanceRef = useRef<fabric.Canvas | null>(null)
 
@@ -196,6 +201,8 @@ export function useCanvas(canvasRef: RefObject<HTMLCanvasElement | null>) {
         fc.insertAt(img, 0, false)
         fc.renderAll()
         setHasBackground(true)
+        // Store original image dimensions for HD export
+        nativeSizeRef.current = { width: naturalW, height: naturalH }
         saveSnapshot(fc)
       })
     }
@@ -301,7 +308,9 @@ export function useCanvas(canvasRef: RefObject<HTMLCanvasElement | null>) {
     setCanRedo(false)
   }, [])
 
-  // ── Download as PNG ───────────────────────────────────────────────────────
+  // ── Download as PNG (HD) ──────────────────────────────────────────────────
+  // The canvas is scaled down for display. We calculate the multiplier as
+  // nativeWidth / displayWidth so the export is always at full resolution.
   const downloadImage = useCallback(() => {
     const fc = canvasInstanceRef.current
     if (!fc) return
@@ -309,7 +318,11 @@ export function useCanvas(canvasRef: RefObject<HTMLCanvasElement | null>) {
     fc.discardActiveObject()
     fc.renderAll()
 
-    const dataUrl = fc.toDataURL({ format: 'png', multiplier: 1 })
+    const displayW = fc.getWidth()
+    const { width: nativeW } = nativeSizeRef.current
+    const multiplier = nativeW > 0 ? nativeW / displayW : 1
+
+    const dataUrl = fc.toDataURL({ format: 'png', multiplier })
     const link = document.createElement('a')
     link.href = dataUrl
     link.download = 'composed-image.png'
@@ -531,6 +544,8 @@ export function useCanvas(canvasRef: RefObject<HTMLCanvasElement | null>) {
     })
 
     fc.renderAll()
+    // Update native size so HD export reflects the chosen preset/custom dimensions
+    nativeSizeRef.current = { width: targetW, height: targetH }
     saveSnapshot(fc)
   }, [saveSnapshot])
 

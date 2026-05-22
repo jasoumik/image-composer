@@ -172,17 +172,16 @@ export default function Sidebar({
   const [activeDrawer, setActiveDrawer] = useState<SectionKey | null>(null)
   const editSectionRef = useRef<HTMLDivElement>(null)
 
-  // Auto-open 'Edit' section when something is selected
+  // Keep the last non-null selected object so the Edit section content stays
+  // rendered (and the same height) even after Fabric clears selection when the
+  // user clicks a sidebar input. This prevents the height change that causes
+  // the sidebar to scroll to the top.
+  const [lastSelected, setLastSelected] = useState<fabric.Object | null>(null)
   useEffect(() => {
     if (selectedObject) {
-      // Desktop: open Edit section
+      setLastSelected(selectedObject)
       setOpenSections((prev) => new Set([...prev, 'Edit']))
-      // Mobile: open Edit drawer
       setActiveDrawer('Edit')
-      // Scroll desktop edit section into view
-      setTimeout(() => {
-        editSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
-      }, 50)
     }
   }, [selectedObject])
 
@@ -252,9 +251,11 @@ export default function Sidebar({
 
   const textContent = <TextControls onAdd={addText} />
 
-  const editContent = selectedObject ? (
+  // Use lastSelected (not selectedObject) so the Edit panel keeps its height
+  // when Fabric clears selection on sidebar input focus — preventing scroll jumps.
+  const editContent = lastSelected ? (
     <SelectionControls
-      selectedObject={selectedObject}
+      selectedObject={lastSelected}
       onApply={applyTextProps}
       onRemove={removeActive}
       onApplyObjectProps={applyObjectProps}
@@ -267,7 +268,7 @@ export default function Sidebar({
       onSaveFilterSnapshot={saveImageFilterSnapshot}
     />
   ) : (
-    <p className="text-xs text-[#8b90a7]">No element selected on canvas.</p>
+    <p className="text-xs text-[#8b90a7]">Select an element on the canvas to edit it.</p>
   )
 
   const canvasContent = (
@@ -277,7 +278,11 @@ export default function Sidebar({
           <button
             key={preset.label}
             type="button"
-            onClick={() => resizeCanvas(preset.width, preset.height)}
+            onClick={() => {
+              setCustomW(String(preset.width))
+              setCustomH(String(preset.height))
+              resizeCanvas(preset.width, preset.height)
+            }}
             className="rounded-md border border-[#2e3347] bg-[#0f1117] hover:border-[#6c63ff]/60 px-2.5 py-1.5 text-[10px] text-[#8b90a7] hover:text-[#e8eaf0] transition-colors touch-manipulation"
           >
             {preset.label}
@@ -285,22 +290,26 @@ export default function Sidebar({
         ))}
       </div>
       <div className="flex items-center gap-2">
+        {/* type="text" + inputMode avoids browser-native scroll-to-input
+            behaviour that type="number" triggers in scrollable containers */}
         <input
-          type="number"
+          type="text"
+          inputMode="numeric"
+          pattern="[0-9]*"
           value={customW}
-          onChange={(e) => setCustomW(e.target.value)}
-          min={100}
-          max={8000}
+          onChange={(e) => setCustomW(e.target.value.replace(/\D/g, ''))}
+          onFocus={(e) => e.target.select()}
           placeholder="W"
           className="w-0 flex-1 rounded-md bg-[#0f1117] border border-[#2e3347] px-2 py-1.5 text-xs text-[#e8eaf0] focus:outline-none focus:border-[#6c63ff] transition-colors min-h-[36px]"
         />
         <span className="text-xs text-[#8b90a7]">×</span>
         <input
-          type="number"
+          type="text"
+          inputMode="numeric"
+          pattern="[0-9]*"
           value={customH}
-          onChange={(e) => setCustomH(e.target.value)}
-          min={100}
-          max={8000}
+          onChange={(e) => setCustomH(e.target.value.replace(/\D/g, ''))}
+          onFocus={(e) => e.target.select()}
           placeholder="H"
           className="w-0 flex-1 rounded-md bg-[#0f1117] border border-[#2e3347] px-2 py-1.5 text-xs text-[#e8eaf0] focus:outline-none focus:border-[#6c63ff] transition-colors min-h-[36px]"
         />
@@ -392,7 +401,8 @@ export default function Sidebar({
           <DesktopSection sectionKey="Background" />
           <DesktopSection sectionKey="Logo" />
           <DesktopSection sectionKey="Text" />
-          {selectedObject && <DesktopSection sectionKey="Edit" />}
+          {/* Always in DOM — conditional unmount causes sidebar height change → scroll jump */}
+          <DesktopSection sectionKey="Edit" />
           <DesktopSection sectionKey="Canvas" />
         </div>
 
