@@ -6,6 +6,16 @@ import { fabric } from 'fabric'
 // Using a WeakSet avoids polluting fabric's type system.
 const backgroundObjects = new WeakSet<fabric.Object>()
 
+const STORAGE_KEY = 'image-composer-state'
+
+interface PersistedState {
+  canvasJSON: string
+  nativeWidth: number
+  nativeHeight: number
+  displayWidth: number
+  displayHeight: number
+}
+
 /**
  * Returns max canvas dimensions based on current viewport width.
  * Mobile  (<640):  full width minus small padding, half viewport height
@@ -50,6 +60,7 @@ export function useCanvas(canvasRef: RefObject<HTMLCanvasElement | null>) {
   const [selectedObject, setSelectedObject] = useState<fabric.Object | null>(null)
   const [canUndo, setCanUndo] = useState(false)
   const [canRedo, setCanRedo] = useState(false)
+  const [showGrid, setShowGrid] = useState(false)
 
   // Native (full-resolution) dimensions of the composition.
   // The canvas is scaled down to fit the viewport for display, but we export
@@ -58,6 +69,9 @@ export function useCanvas(canvasRef: RefObject<HTMLCanvasElement | null>) {
 
   // Keep a ref to canvas for use inside event callbacks without stale closures
   const canvasInstanceRef = useRef<fabric.Canvas | null>(null)
+
+  // Ref to track the bg fill gradient rect (Feature 5)
+  const bgFillRectRef = useRef<fabric.Rect | null>(null)
 
   // ── History refs ────────────────────────────────────────────────────────
   const historyRef = useRef<string[]>([])
@@ -98,10 +112,60 @@ export function useCanvas(canvasRef: RefObject<HTMLCanvasElement | null>) {
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Restore persisted state on first mount ───────────────────────────────
+  useEffect(() => {
+    const fc = canvasInstanceRef.current
+    if (!fc) return
+
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (!raw) return
+
+    try {
+      const { canvasJSON, nativeWidth, nativeHeight, displayWidth, displayHeight } =
+        JSON.parse(raw) as PersistedState
+
+      // Size the canvas to match what was saved before loading objects
+      fc.setWidth(displayWidth)
+      fc.setHeight(displayHeight)
+      nativeSizeRef.current = { width: nativeWidth, height: nativeHeight }
+
+      suppressSnapshotRef.current = true
+      fc.loadFromJSON(canvasJSON, () => {
+        fc.getObjects().forEach((o) => {
+          const obj = o as fabric.Object & { _isBackground?: boolean; _isLocked?: boolean; _isBgFill?: boolean }
+          if (obj._isBackground) {
+            backgroundObjects.add(o)
+            o.set({ selectable: false, evented: false, hoverCursor: 'default' })
+          }
+          if (obj._isLocked) {
+            o.set({ lockMovementX: true, lockMovementY: true, lockRotation: true, lockScalingX: true, lockScalingY: true, hasControls: false })
+          }
+          if (obj._isBgFill) {
+            o.set({ selectable: false, evented: false, hoverCursor: 'default' })
+            bgFillRectRef.current = o as fabric.Rect
+          }
+        })
+        fc.renderAll()
+        suppressSnapshotRef.current = false
+
+        const hasbg = fc.getObjects().some((o) => backgroundObjects.has(o))
+        setHasBackground(hasbg)
+
+        // Seed history with the restored snapshot so undo/redo starts correctly
+        historyRef.current = [canvasJSON]
+        historyIndexRef.current = 0
+        setCanUndo(false)
+        setCanRedo(false)
+      })
+    } catch {
+      localStorage.removeItem(STORAGE_KEY)
+    }
+  }, [canvas]) // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── History helpers ──────────────────────────────────────────────────────
   const saveSnapshot = useCallback((fc: fabric.Canvas) => {
     if (suppressSnapshotRef.current) return
-    const json = JSON.stringify(fc.toJSON(['_isBackground']))
+    const json = JSON.stringify(fc.toJSON(['_isBackground', '_isLocked', '_isBgFill']))
     // Truncate forward history on new action
     historyRef.current = historyRef.current.slice(0, historyIndexRef.current + 1)
     historyRef.current.push(json)
@@ -112,6 +176,20 @@ export function useCanvas(canvasRef: RefObject<HTMLCanvasElement | null>) {
     }
     setCanUndo(historyIndexRef.current > 0)
     setCanRedo(false)
+
+    // Persist current state to localStorage so it survives page reloads
+    try {
+      const state: PersistedState = {
+        canvasJSON: json,
+        nativeWidth: nativeSizeRef.current.width,
+        nativeHeight: nativeSizeRef.current.height,
+        displayWidth: fc.getWidth(),
+        displayHeight: fc.getHeight(),
+      }
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
+    } catch {
+      // localStorage can be unavailable (private browsing quota) — fail silently
+    }
   }, [])
 
   const updateHistoryState = useCallback(() => {
@@ -126,9 +204,17 @@ export function useCanvas(canvasRef: RefObject<HTMLCanvasElement | null>) {
     fc.loadFromJSON(json, () => {
       // Re-lock background objects after restore
       fc.getObjects().forEach((o) => {
-        if ((o as fabric.Object & { _isBackground?: boolean })._isBackground) {
+        const obj = o as fabric.Object & { _isBackground?: boolean; _isLocked?: boolean; _isBgFill?: boolean }
+        if (obj._isBackground) {
           backgroundObjects.add(o)
           o.set({ selectable: false, evented: false, hoverCursor: 'default' })
+        }
+        if (obj._isLocked) {
+          o.set({ lockMovementX: true, lockMovementY: true, lockRotation: true, lockScalingX: true, lockScalingY: true, hasControls: false })
+        }
+        if (obj._isBgFill) {
+          o.set({ selectable: false, evented: false, hoverCursor: 'default' })
+          bgFillRectRef.current = o as fabric.Rect
         }
       })
       fc.renderAll()
@@ -301,17 +387,18 @@ export function useCanvas(canvasRef: RefObject<HTMLCanvasElement | null>) {
     fc.renderAll()
     setHasBackground(false)
     setSelectedObject(null)
+    bgFillRectRef.current = null
     // Reset history
     historyRef.current = []
     historyIndexRef.current = -1
     setCanUndo(false)
     setCanRedo(false)
+    // Remove persisted state so a reload starts fresh
+    localStorage.removeItem(STORAGE_KEY)
   }, [])
 
-  // ── Download as PNG (HD) ──────────────────────────────────────────────────
-  // The canvas is scaled down for display. We calculate the multiplier as
-  // nativeWidth / displayWidth so the export is always at full resolution.
-  const downloadImage = useCallback(() => {
+  // ── Download image (Feature 2: format + quality) ──────────────────────────
+  const downloadImage = useCallback((format: 'png' | 'jpg' | 'webp' = 'png', quality = 1) => {
     const fc = canvasInstanceRef.current
     if (!fc) return
 
@@ -322,10 +409,26 @@ export function useCanvas(canvasRef: RefObject<HTMLCanvasElement | null>) {
     const { width: nativeW } = nativeSizeRef.current
     const multiplier = nativeW > 0 ? nativeW / displayW : 1
 
-    const dataUrl = fc.toDataURL({ format: 'png', multiplier })
+    let dataUrl: string
+    if (format === 'webp') {
+      // Fabric doesn't support webp natively — use the underlying canvas element
+      const el = fc.getElement()
+      const temp = document.createElement('canvas')
+      temp.width = Math.round(displayW * multiplier)
+      temp.height = Math.round(fc.getHeight() * multiplier)
+      const ctx = temp.getContext('2d')!
+      ctx.drawImage(el, 0, 0, temp.width, temp.height)
+      dataUrl = temp.toDataURL('image/webp', quality)
+    } else {
+      dataUrl = fc.toDataURL({ format: format === 'jpg' ? 'jpeg' : 'png', quality, multiplier })
+    }
+
+    const ext = format === 'jpg' ? 'jpg' : format
+    const now = new Date()
+    const ts = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}-${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`
     const link = document.createElement('a')
     link.href = dataUrl
-    link.download = 'composed-image.png'
+    link.download = `${ts}.${ext}`
     link.click()
   }, [])
 
@@ -673,6 +776,136 @@ export function useCanvas(canvasRef: RefObject<HTMLCanvasElement | null>) {
     setIsCropping(false)
   }, [])
 
+  // ── Feature 1: Keyboard Nudge ─────────────────────────────────────────────
+  const nudgeActive = useCallback((dx: number, dy: number) => {
+    const fc = canvasInstanceRef.current
+    if (!fc) return
+    const active = fc.getActiveObject()
+    if (!active || backgroundObjects.has(active)) return
+    active.set({ left: (active.left ?? 0) + dx, top: (active.top ?? 0) + dy })
+    active.setCoords()
+    fc.renderAll()
+    saveSnapshot(fc)
+  }, [saveSnapshot])
+
+  // ── Feature 3: Lock Object ────────────────────────────────────────────────
+  const toggleLock = useCallback(() => {
+    const fc = canvasInstanceRef.current
+    if (!fc) return
+    const active = fc.getActiveObject()
+    if (!active || backgroundObjects.has(active)) return
+    const locked = !!(active as fabric.Object & { _isLocked?: boolean })._isLocked
+    if (locked) {
+      active.set({
+        lockMovementX: false, lockMovementY: false,
+        lockRotation: false, lockScalingX: false, lockScalingY: false,
+        hasControls: true,
+      })
+      ;(active as fabric.Object & { _isLocked?: boolean })._isLocked = false
+    } else {
+      active.set({
+        lockMovementX: true, lockMovementY: true,
+        lockRotation: true, lockScalingX: true, lockScalingY: true,
+        hasControls: false,
+      })
+      ;(active as fabric.Object & { _isLocked?: boolean })._isLocked = true
+    }
+    fc.renderAll()
+    saveSnapshot(fc)
+  }, [saveSnapshot])
+
+  // ── Feature 4: Grid Toggle ────────────────────────────────────────────────
+  const toggleGrid = useCallback(() => setShowGrid(prev => !prev), [])
+
+  // ── Feature 5: Solid Background Color ────────────────────────────────────
+  const setCanvasBgSolid = useCallback((color: string) => {
+    const fc = canvasInstanceRef.current
+    if (!fc) return
+    // Remove any existing gradient rect
+    if (bgFillRectRef.current) {
+      fc.remove(bgFillRectRef.current)
+      bgFillRectRef.current = null
+    }
+    fc.backgroundColor = color
+    fc.renderAll()
+    setHasBackground(true)
+    if (nativeSizeRef.current.width === 0) {
+      nativeSizeRef.current = { width: fc.getWidth(), height: fc.getHeight() }
+    }
+    saveSnapshot(fc)
+  }, [saveSnapshot])
+
+  // ── Feature 5: Gradient Background Color ─────────────────────────────────
+  const setCanvasBgGradient = useCallback((c1: string, c2: string, angle: number) => {
+    const fc = canvasInstanceRef.current
+    if (!fc) return
+    fc.backgroundColor = ''
+    // Remove old gradient rect
+    if (bgFillRectRef.current) fc.remove(bgFillRectRef.current)
+
+    const w = fc.getWidth()
+    const h = fc.getHeight()
+    const rad = (angle * Math.PI) / 180
+    const gradient = new fabric.Gradient({
+      type: 'linear',
+      gradientUnits: 'pixels',
+      coords: {
+        x1: w / 2 - Math.cos(rad) * w / 2,
+        y1: h / 2 - Math.sin(rad) * h / 2,
+        x2: w / 2 + Math.cos(rad) * w / 2,
+        y2: h / 2 + Math.sin(rad) * h / 2,
+      },
+      colorStops: [
+        { offset: 0, color: c1 },
+        { offset: 1, color: c2 },
+      ],
+    })
+
+    const rect = new fabric.Rect({
+      left: 0, top: 0, width: w, height: h,
+      fill: gradient,
+      selectable: false, evented: false, hoverCursor: 'default',
+    })
+    ;(rect as fabric.Object & { _isBgFill?: boolean })._isBgFill = true
+    bgFillRectRef.current = rect
+    fc.insertAt(rect, 0, false)
+    fc.renderAll()
+    setHasBackground(true)
+    if (nativeSizeRef.current.width === 0) {
+      nativeSizeRef.current = { width: w, height: h }
+    }
+    saveSnapshot(fc)
+  }, [saveSnapshot])
+
+  // ── Feature 6: Add Shape ──────────────────────────────────────────────────
+  const addShape = useCallback((type: 'rect' | 'circle', fill: string) => {
+    const fc = canvasInstanceRef.current
+    if (!fc) return
+    const cx = fc.getWidth() / 2
+    const cy = fc.getHeight() / 2
+    const size = Math.min(fc.getWidth(), fc.getHeight()) * 0.25
+
+    let shape: fabric.Object
+    if (type === 'rect') {
+      shape = new fabric.Rect({
+        left: cx - size / 2, top: cy - size / 2,
+        width: size, height: size,
+        fill, rx: 0, ry: 0,
+      })
+    } else {
+      shape = new fabric.Ellipse({
+        left: cx - size / 2, top: cy - size / 2,
+        rx: size / 2, ry: size / 2,
+        fill,
+      })
+    }
+
+    fc.add(shape)
+    fc.setActiveObject(shape)
+    fc.renderAll()
+    saveSnapshot(fc)
+  }, [saveSnapshot])
+
   // ── Window resize handler (debounced, re-scales background) ──────────────
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout>
@@ -752,5 +985,12 @@ export function useCanvas(canvasRef: RefObject<HTMLCanvasElement | null>) {
     startCrop,
     applyCrop,
     cancelCrop,
+    nudgeActive,
+    toggleLock,
+    showGrid,
+    toggleGrid,
+    setCanvasBgSolid,
+    setCanvasBgGradient,
+    addShape,
   }
 }

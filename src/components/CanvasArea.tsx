@@ -13,6 +13,7 @@ interface CanvasAreaProps {
   selectedObject: fabric.Object | null
   removeActive: () => void
   canvas: fabric.Canvas | null
+  showGrid: boolean
 }
 
 /**
@@ -27,6 +28,7 @@ export default function CanvasArea({
   selectedObject,
   removeActive,
   canvas,
+  showGrid,
 }: CanvasAreaProps) {
 
   // Keyboard shortcut: Delete / Backspace removes selected object
@@ -69,12 +71,23 @@ export default function CanvasArea({
           hasBackground ? 'opacity-100' : 'opacity-0 pointer-events-none absolute',
         ].join(' ')}
         style={{
+          position: 'relative',
           boxShadow: '0 8px 40px rgba(0,0,0,0.6), 0 2px 8px rgba(0,0,0,0.4)',
           borderRadius: '4px',
           overflow: 'hidden',
         }}
       >
         <canvas ref={canvasRef} />
+        {/* ── Grid overlay (Feature 4) ─────────────────────────────── */}
+        {showGrid && (
+          <div
+            className="absolute inset-0 pointer-events-none"
+            style={{
+              backgroundImage: `linear-gradient(rgba(255,255,255,0.08) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.08) 1px, transparent 1px)`,
+              backgroundSize: '50px 50px',
+            }}
+          />
+        )}
       </div>
 
       {/* ── Selection hint bar + floating delete button ──────────────── */}

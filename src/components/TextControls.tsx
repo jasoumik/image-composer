@@ -39,7 +39,7 @@ interface TextControlsProps {
 export default function TextControls({ onAdd }: TextControlsProps) {
   const [text, setText] = useState('Your text here')
   const [color, setColor] = useState('#ffffff')
-  const [fontSize, setFontSize] = useState<string>('48')
+  const [fontSize, setFontSize] = useState<string>('24')
   const [fontFamily, setFontFamily] = useState('Poppins')
   const [sizeError, setSizeError] = useState('')
 

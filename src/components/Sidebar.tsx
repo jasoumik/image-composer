@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { fabric } from 'fabric'
 import UploadZone from './UploadZone'
 import TextControls from './TextControls'
@@ -13,7 +13,7 @@ interface SidebarProps {
   addText: (text: string, color: string, size: number, fontFamily: string) => void
   removeActive: () => void
   clearCanvas: () => void
-  downloadImage: () => void
+  downloadImage: (format: 'png' | 'jpg' | 'webp', quality: number) => void
   applyTextProps: (
     color: string,
     size: number,
@@ -45,9 +45,15 @@ interface SidebarProps {
   startCrop: () => void
   applyCrop: () => void
   cancelCrop: () => void
+  toggleLock: () => void
+  showGrid: boolean
+  toggleGrid: () => void
+  setCanvasBgSolid: (color: string) => void
+  setCanvasBgGradient: (c1: string, c2: string, angle: number) => void
+  addShape: (type: 'rect' | 'circle', fill: string) => void
 }
 
-type SectionKey = 'Background' | 'Logo' | 'Text' | 'Edit' | 'Canvas'
+type SectionKey = 'Background' | 'Logo' | 'Text' | 'Shapes' | 'Edit' | 'Canvas'
 
 // ── Chevron icon ──────────────────────────────────────────────────────────────
 function Chevron({ open }: { open: boolean }) {
@@ -84,6 +90,13 @@ function TextIcon() {
   return (
     <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+    </svg>
+  )
+}
+function ShapesIcon() {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M4 6a2 2 0 012-2h4a2 2 0 012 2v4a2 2 0 01-2 2H6a2 2 0 01-2-2V6zm10 9a3 3 0 116 0 3 3 0 01-6 0z" />
     </svg>
   )
 }
@@ -128,9 +141,47 @@ function sectionIcon(key: SectionKey) {
     case 'Background': return <BgIcon />
     case 'Logo': return <LogoIcon />
     case 'Text': return <TextIcon />
+    case 'Shapes': return <ShapesIcon />
     case 'Edit': return <EditIcon />
     case 'Canvas': return <CanvasIcon />
   }
+}
+
+// ── DesktopSection — declared outside Sidebar to satisfy react-hooks/static-components ──
+function DesktopSection({
+  sectionKey,
+  open,
+  onToggle,
+  getContent,
+  getLabel,
+  sectionRef,
+}: {
+  sectionKey: SectionKey
+  open: boolean
+  onToggle: (key: SectionKey) => void
+  getContent: (key: SectionKey) => React.ReactNode
+  getLabel: (key: SectionKey) => string
+  sectionRef: React.RefObject<HTMLDivElement | null> | undefined
+}) {
+  return (
+    <div ref={sectionRef} className="flex flex-col gap-0">
+      <button
+        type="button"
+        onClick={() => onToggle(sectionKey)}
+        className="flex w-full items-center justify-between py-2.5 group"
+      >
+        <span className="text-[11px] font-semibold uppercase tracking-widest text-[#8b90a7] group-hover:text-[#b0b4c8] transition-colors">
+          {getLabel(sectionKey)}
+        </span>
+        <Chevron open={open} />
+      </button>
+      {open && (
+        <div className="pb-4">
+          {getContent(sectionKey)}
+        </div>
+      )}
+    </div>
+  )
 }
 
 export default function Sidebar({
@@ -160,6 +211,12 @@ export default function Sidebar({
   startCrop,
   applyCrop,
   cancelCrop,
+  toggleLock,
+  showGrid,
+  toggleGrid,
+  setCanvasBgSolid,
+  setCanvasBgGradient,
+  addShape,
 }: SidebarProps) {
   // ── Desktop: which sections are open ─────────────────────────────────────
   const [openSections, setOpenSections] = useState<Set<SectionKey>>(
@@ -168,14 +225,28 @@ export default function Sidebar({
   const [customW, setCustomW] = useState<string>('1080')
   const [customH, setCustomH] = useState<string>('1080')
 
+  // ── Export format/quality state (Feature 2) ───────────────────────────────
+  const [exportFormat, setExportFormat] = useState<'png' | 'jpg' | 'webp'>('png')
+  const [exportQuality, setExportQuality] = useState(90)
+
+  // ── Background fill state (Feature 5) ────────────────────────────────────
+  const [bgFillTab, setBgFillTab] = useState<'solid' | 'gradient'>('solid')
+  const [bgSolidColor, setBgSolidColor] = useState('#1a1d27')
+  const [bgGradC1, setBgGradC1] = useState('#6c63ff')
+  const [bgGradC2, setBgGradC2] = useState('#1a1d27')
+  const [bgGradAngle, setBgGradAngle] = useState<string>('90')
+
+  // ── Shape fill state (Feature 6) ─────────────────────────────────────────
+  const [shapeFill, setShapeFill] = useState('#6c63ff')
+
   // ── Mobile: which drawer is open ─────────────────────────────────────────
   const [activeDrawer, setActiveDrawer] = useState<SectionKey | null>(null)
+  const [showExportSheet, setShowExportSheet] = useState(false)
   const editSectionRef = useRef<HTMLDivElement>(null)
 
   // Keep the last non-null selected object so the Edit section content stays
   // rendered (and the same height) even after Fabric clears selection when the
-  // user clicks a sidebar input. This prevents the height change that causes
-  // the sidebar to scroll to the top.
+  // user clicks a sidebar input.
   const [lastSelected, setLastSelected] = useState<fabric.Object | null>(null)
   useEffect(() => {
     if (selectedObject) {
@@ -199,6 +270,106 @@ export default function Sidebar({
   }
 
   const closeDrawer = () => setActiveDrawer(null)
+
+  // ── Background fill sub-section (Feature 5) ───────────────────────────────
+  const bgFillContent = (
+    <div className="flex flex-col gap-2 pt-2 border-t border-[#2e3347]">
+      <p className="text-[10px] font-semibold uppercase tracking-widest text-[#8b90a7]">Background Fill</p>
+      {/* Tab toggle */}
+      <div className="flex gap-1">
+        {(['solid', 'gradient'] as const).map((tab) => (
+          <button
+            key={tab}
+            type="button"
+            onClick={() => setBgFillTab(tab)}
+            className={`flex-1 rounded-md border px-2 py-1.5 text-xs font-medium transition-colors touch-manipulation min-h-[36px] capitalize ${
+              bgFillTab === tab
+                ? 'bg-[#6c63ff] border-[#6c63ff] text-white'
+                : 'border-[#2e3347] bg-transparent text-[#8b90a7] hover:bg-[#242736]'
+            }`}
+          >
+            {tab}
+          </button>
+        ))}
+      </div>
+
+      {bgFillTab === 'solid' && (
+        <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-1 rounded-md bg-[#0f1117] border border-[#2e3347] px-2 py-1.5 min-h-[40px]">
+            <input
+              type="color"
+              value={bgSolidColor}
+              onChange={(e) => setBgSolidColor(e.target.value)}
+              className="h-6 w-6 cursor-pointer rounded border-0 bg-transparent p-0 touch-manipulation"
+              aria-label="Background solid colour"
+            />
+            <span className="text-xs text-[#8b90a7] font-mono">{bgSolidColor}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setCanvasBgSolid(bgSolidColor)}
+            className="rounded-md bg-[#6c63ff] hover:bg-[#5a52e0] px-3 py-1.5 text-xs font-medium text-white transition-colors touch-manipulation min-h-[40px]"
+          >
+            Apply
+          </button>
+        </div>
+      )}
+
+      {bgFillTab === 'gradient' && (
+        <div className="flex flex-col gap-2">
+          <div className="flex gap-2">
+            <div className="flex flex-col gap-1 flex-1">
+              <label className="text-[10px] text-[#8b90a7]">Start</label>
+              <div className="flex items-center gap-1.5 rounded-md bg-[#0f1117] border border-[#2e3347] px-2 py-1 min-h-[36px]">
+                <input
+                  type="color"
+                  value={bgGradC1}
+                  onChange={(e) => setBgGradC1(e.target.value)}
+                  className="h-5 w-5 cursor-pointer rounded border-0 bg-transparent p-0 touch-manipulation"
+                  aria-label="Gradient start colour"
+                />
+                <span className="text-[10px] text-[#8b90a7] font-mono">{bgGradC1}</span>
+              </div>
+            </div>
+            <div className="flex flex-col gap-1 flex-1">
+              <label className="text-[10px] text-[#8b90a7]">End</label>
+              <div className="flex items-center gap-1.5 rounded-md bg-[#0f1117] border border-[#2e3347] px-2 py-1 min-h-[36px]">
+                <input
+                  type="color"
+                  value={bgGradC2}
+                  onChange={(e) => setBgGradC2(e.target.value)}
+                  className="h-5 w-5 cursor-pointer rounded border-0 bg-transparent p-0 touch-manipulation"
+                  aria-label="Gradient end colour"
+                />
+                <span className="text-[10px] text-[#8b90a7] font-mono">{bgGradC2}</span>
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-[10px] text-[#8b90a7] shrink-0">Angle</label>
+            <input
+              type="text"
+              inputMode="numeric"
+              pattern="[0-9]*"
+              value={bgGradAngle}
+              onChange={(e) => setBgGradAngle(e.target.value.replace(/\D/g, ''))}
+              onFocus={(e) => e.target.select()}
+              placeholder="90"
+              className="w-16 rounded-md bg-[#0f1117] border border-[#2e3347] px-2 py-1 text-xs text-[#e8eaf0] focus:outline-none focus:border-[#6c63ff] transition-colors min-h-[36px]"
+            />
+            <span className="text-xs text-[#8b90a7]">°</span>
+            <button
+              type="button"
+              onClick={() => setCanvasBgGradient(bgGradC1, bgGradC2, Number(bgGradAngle) || 90)}
+              className="flex-1 rounded-md bg-[#6c63ff] hover:bg-[#5a52e0] px-3 py-1.5 text-xs font-medium text-white transition-colors touch-manipulation min-h-[36px]"
+            >
+              Apply
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
 
   // ── Shared section content ────────────────────────────────────────────────
   const backgroundContent = (
@@ -236,6 +407,7 @@ export default function Sidebar({
           </button>
         </div>
       )}
+      {bgFillContent}
     </div>
   )
 
@@ -250,6 +422,47 @@ export default function Sidebar({
   )
 
   const textContent = <TextControls onAdd={addText} />
+
+  // ── Shapes content (Feature 6) ────────────────────────────────────────────
+  const shapesContent = (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-col gap-1">
+        <label className="text-xs text-[#8b90a7]">Fill Colour</label>
+        <div className="flex items-center gap-2 rounded-md bg-[#0f1117] border border-[#2e3347] px-2 py-1.5 min-h-[40px]">
+          <input
+            type="color"
+            value={shapeFill}
+            onChange={(e) => setShapeFill(e.target.value)}
+            className="h-6 w-6 cursor-pointer rounded border-0 bg-transparent p-0 touch-manipulation"
+            aria-label="Shape fill colour"
+          />
+          <span className="text-xs text-[#8b90a7] font-mono">{shapeFill}</span>
+        </div>
+      </div>
+      <div className="flex gap-2">
+        <button
+          type="button"
+          onClick={() => addShape('rect', shapeFill)}
+          className="flex-1 rounded-md bg-[#0f1117] border border-[#2e3347] hover:border-[#6c63ff]/60 px-3 py-2 text-xs text-[#e8eaf0] transition-colors touch-manipulation min-h-[44px] flex flex-col items-center gap-1"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-[#8b90a7]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+            <rect x="3" y="3" width="18" height="18" rx="1" />
+          </svg>
+          Rectangle
+        </button>
+        <button
+          type="button"
+          onClick={() => addShape('circle', shapeFill)}
+          className="flex-1 rounded-md bg-[#0f1117] border border-[#2e3347] hover:border-[#6c63ff]/60 px-3 py-2 text-xs text-[#e8eaf0] transition-colors touch-manipulation min-h-[44px] flex flex-col items-center gap-1"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-[#8b90a7]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+            <circle cx="12" cy="12" r="9" />
+          </svg>
+          Circle
+        </button>
+      </div>
+    </div>
+  )
 
   // Use lastSelected (not selectedObject) so the Edit panel keeps its height
   // when Fabric clears selection on sidebar input focus — preventing scroll jumps.
@@ -266,9 +479,49 @@ export default function Sidebar({
       onDuplicate={duplicateActive}
       onApplyImageFilters={applyImageFilters}
       onSaveFilterSnapshot={saveImageFilterSnapshot}
+      onToggleLock={toggleLock}
     />
   ) : (
     <p className="text-xs text-[#8b90a7]">Select an element on the canvas to edit it.</p>
+  )
+
+  // ── Export format/quality UI (Feature 2) ──────────────────────────────────
+  const exportControls = (
+    <div className="flex flex-col gap-2">
+      <div className="flex gap-1">
+        {(['png', 'jpg', 'webp'] as const).map((fmt) => (
+          <button
+            key={fmt}
+            type="button"
+            onClick={() => setExportFormat(fmt)}
+            className={`flex-1 rounded-md border px-2 py-1.5 text-xs font-medium uppercase transition-colors touch-manipulation min-h-[36px] ${
+              exportFormat === fmt
+                ? 'bg-[#6c63ff] border-[#6c63ff] text-white'
+                : 'border-[#2e3347] bg-transparent text-[#8b90a7] hover:bg-[#242736]'
+            }`}
+          >
+            {fmt}
+          </button>
+        ))}
+      </div>
+      {exportFormat !== 'png' && (
+        <div className="flex flex-col gap-1">
+          <div className="flex items-center justify-between">
+            <label className="text-xs text-[#8b90a7]">Quality</label>
+            <span className="text-xs text-[#e8eaf0] font-mono w-8 text-right">{exportQuality}%</span>
+          </div>
+          <input
+            type="range"
+            min={10}
+            max={100}
+            step={5}
+            value={exportQuality}
+            onChange={(e) => setExportQuality(Number(e.target.value))}
+            className="w-full accent-[#6c63ff] cursor-pointer"
+          />
+        </div>
+      )}
+    </div>
   )
 
   const canvasContent = (
@@ -290,8 +543,6 @@ export default function Sidebar({
         ))}
       </div>
       <div className="flex items-center gap-2">
-        {/* type="text" + inputMode avoids browser-native scroll-to-input
-            behaviour that type="number" triggers in scrollable containers */}
         <input
           type="text"
           inputMode="numeric"
@@ -325,6 +576,23 @@ export default function Sidebar({
           Apply
         </button>
       </div>
+      {/* Grid toggle (Feature 4) */}
+      <button
+        type="button"
+        onClick={toggleGrid}
+        className={`w-full rounded-md border px-3 py-2 text-xs font-medium transition-colors touch-manipulation min-h-[40px] ${
+          showGrid
+            ? 'bg-[#6c63ff] border-[#6c63ff] text-white'
+            : 'border-[#2e3347] bg-transparent text-[#8b90a7] hover:bg-[#242736]'
+        }`}
+      >
+        {showGrid ? 'Hide Grid' : 'Show Grid'}
+      </button>
+      {/* Export format/quality — shown here so mobile Canvas drawer also has it */}
+      <div className="pt-2 border-t border-[#2e3347]">
+        <p className="text-[10px] font-semibold uppercase tracking-widest text-[#8b90a7] mb-2">Export Format</p>
+        {exportControls}
+      </div>
     </div>
   )
 
@@ -333,6 +601,7 @@ export default function Sidebar({
       case 'Background': return backgroundContent
       case 'Logo': return logoContent
       case 'Text': return textContent
+      case 'Shapes': return shapesContent
       case 'Edit': return editContent
       case 'Canvas': return canvasContent
     }
@@ -343,38 +612,17 @@ export default function Sidebar({
       case 'Background': return 'Background Image'
       case 'Logo': return 'Logo Overlay'
       case 'Text': return 'Add Text'
+      case 'Shapes': return 'Shapes'
       case 'Edit': return 'Edit Selected'
       case 'Canvas': return 'Canvas Size'
     }
   }
 
   // ── Desktop collapsible section ───────────────────────────────────────────
-  function DesktopSection({ sectionKey }: { sectionKey: SectionKey }) {
-    const open = openSections.has(sectionKey)
-    const ref = sectionKey === 'Edit' ? editSectionRef : undefined
-    return (
-      <div ref={ref} className="flex flex-col gap-0">
-        <button
-          type="button"
-          onClick={() => toggleDesktopSection(sectionKey)}
-          className="flex w-full items-center justify-between py-2.5 group"
-        >
-          <span className="text-[11px] font-semibold uppercase tracking-widest text-[#8b90a7] group-hover:text-[#b0b4c8] transition-colors">
-            {sectionLabel(sectionKey)}
-          </span>
-          <Chevron open={open} />
-        </button>
-        {open && (
-          <div className="pb-4">
-            {getSectionContent(sectionKey)}
-          </div>
-        )}
-      </div>
-    )
-  }
+  // Rendered via the DesktopSection component defined outside Sidebar (below)
 
   // ── Visible toolbar sections on mobile ────────────────────────────────────
-  const mobileToolbarSections: SectionKey[] = ['Background', 'Logo', 'Text', 'Edit', 'Canvas']
+  const mobileToolbarSections: SectionKey[] = ['Background', 'Logo', 'Text', 'Shapes', 'Edit', 'Canvas']
 
   return (
     <>
@@ -398,12 +646,17 @@ export default function Sidebar({
 
         {/* Scrollable sections */}
         <div className="flex-1 overflow-y-auto px-5 py-4 flex flex-col divide-y divide-[#2e3347]">
-          <DesktopSection sectionKey="Background" />
-          <DesktopSection sectionKey="Logo" />
-          <DesktopSection sectionKey="Text" />
+          <DesktopSection sectionKey="Background" open={openSections.has('Background')} onToggle={toggleDesktopSection} getContent={getSectionContent} getLabel={sectionLabel} sectionRef={undefined} />
+          <DesktopSection sectionKey="Logo" open={openSections.has('Logo')} onToggle={toggleDesktopSection} getContent={getSectionContent} getLabel={sectionLabel} sectionRef={undefined} />
+          <DesktopSection sectionKey="Text" open={openSections.has('Text')} onToggle={toggleDesktopSection} getContent={getSectionContent} getLabel={sectionLabel} sectionRef={undefined} />
+          <DesktopSection sectionKey="Shapes" open={openSections.has('Shapes')} onToggle={toggleDesktopSection} getContent={getSectionContent} getLabel={sectionLabel} sectionRef={undefined} />
           {/* Always in DOM — conditional unmount causes sidebar height change → scroll jump */}
-          <DesktopSection sectionKey="Edit" />
-          <DesktopSection sectionKey="Canvas" />
+          <DesktopSection sectionKey="Edit" open={openSections.has('Edit')} onToggle={toggleDesktopSection} getContent={getSectionContent} getLabel={sectionLabel} sectionRef={editSectionRef} />
+        </div>
+
+        {/* Canvas size — outside scroll container so focusing inputs never triggers auto-scroll */}
+        <div className="shrink-0 border-t border-[#2e3347] px-5 py-2">
+          <DesktopSection sectionKey="Canvas" open={openSections.has('Canvas')} onToggle={toggleDesktopSection} getContent={getSectionContent} getLabel={sectionLabel} sectionRef={undefined} />
         </div>
 
         {/* Fixed footer */}
@@ -440,9 +693,12 @@ export default function Sidebar({
             Clear Canvas
           </button>
 
+          {/* Export format — desktop footer */}
+          {exportControls}
+
           <button
             type="button"
-            onClick={downloadImage}
+            onClick={() => downloadImage(exportFormat, exportQuality / 100)}
             disabled={!hasBackground}
             className="w-full flex items-center justify-center gap-2 rounded-md bg-[#43c97e] hover:bg-[#38b36c] active:bg-[#2e9a5d] disabled:opacity-40 disabled:cursor-not-allowed px-4 py-2.5 text-sm font-semibold text-white transition-colors touch-manipulation min-h-[44px]"
           >
@@ -508,12 +764,11 @@ export default function Sidebar({
         </div>
 
         {/* ── Fixed bottom toolbar ── */}
-        <div className="fixed bottom-0 left-0 right-0 z-50 flex items-stretch bg-[#1a1d27] border-t border-[#2e3347]" style={{ height: '64px' }}>
+        <div className="fixed bottom-0 left-0 right-0 z-50 bg-[#1a1d27] border-t border-[#2e3347]" style={{ height: '72px' }}>
+          <div className="flex items-stretch h-full overflow-x-auto scrollbar-none" style={{ scrollbarWidth: 'none' }}>
 
-          {/* Section tabs */}
-          <div className="flex flex-1 items-stretch">
+            {/* Section tabs */}
             {mobileToolbarSections.map((key) => {
-              // Hide Edit tab when nothing is selected
               if (key === 'Edit' && !selectedObject) return null
               const isActive = activeDrawer === key
               return (
@@ -522,64 +777,112 @@ export default function Sidebar({
                   type="button"
                   onClick={() => openDrawer(key)}
                   className={[
-                    'relative flex flex-1 flex-col items-center justify-center gap-0.5 min-w-0 px-1 transition-colors touch-manipulation',
+                    'relative flex shrink-0 flex-col items-center justify-center gap-1 transition-colors touch-manipulation',
                     isActive ? 'text-[#6c63ff]' : 'text-[#8b90a7] hover:text-[#b0b4c8]',
                   ].join(' ')}
+                  style={{ minWidth: '68px' }}
                 >
-                  {/* Active indicator */}
                   {isActive && (
-                    <span className="absolute top-0 left-1/2 -translate-x-1/2 h-0.5 w-6 rounded-full bg-[#6c63ff]" />
+                    <span className="absolute top-0 left-1/2 -translate-x-1/2 h-0.5 w-8 rounded-full bg-[#6c63ff]" />
                   )}
-                  {/* Edit badge when selected */}
                   {key === 'Edit' && selectedObject && (
-                    <span className="absolute top-2 right-2 h-1.5 w-1.5 rounded-full bg-[#6c63ff]" />
+                    <span className="absolute top-2 right-3 h-2 w-2 rounded-full bg-[#6c63ff]" />
                   )}
-                  {sectionIcon(key)}
-                  <span className="text-[9px] font-medium leading-none truncate w-full text-center">
+                  <span className="[&>svg]:h-6 [&>svg]:w-6">{sectionIcon(key)}</span>
+                  <span className="text-[10px] font-medium leading-none">
                     {key === 'Background' ? 'Bg' : key}
                   </span>
                 </button>
               )
             })}
-          </div>
 
-          {/* Divider */}
-          <div className="w-px bg-[#2e3347] my-3" />
+            {/* Divider */}
+            <div className="w-px shrink-0 bg-[#2e3347] my-3" />
 
-          {/* Utility actions */}
-          <div className="flex items-stretch gap-0">
+            {/* Utility actions */}
             <button
               type="button"
               onClick={undo}
               disabled={!canUndo}
               title="Undo"
-              className="flex flex-col items-center justify-center gap-0.5 px-3 text-[#8b90a7] hover:text-[#e8eaf0] disabled:opacity-30 disabled:cursor-not-allowed transition-colors touch-manipulation min-w-[44px]"
+              className="flex shrink-0 flex-col items-center justify-center gap-1 text-[#8b90a7] hover:text-[#e8eaf0] disabled:opacity-30 disabled:cursor-not-allowed transition-colors touch-manipulation"
+              style={{ minWidth: '68px' }}
             >
-              <UndoIcon />
-              <span className="text-[9px] font-medium leading-none">Undo</span>
+              <span className="[&>svg]:h-6 [&>svg]:w-6"><UndoIcon /></span>
+              <span className="text-[10px] font-medium leading-none">Undo</span>
             </button>
             <button
               type="button"
               onClick={redo}
               disabled={!canRedo}
               title="Redo"
-              className="flex flex-col items-center justify-center gap-0.5 px-3 text-[#8b90a7] hover:text-[#e8eaf0] disabled:opacity-30 disabled:cursor-not-allowed transition-colors touch-manipulation min-w-[44px]"
+              className="flex shrink-0 flex-col items-center justify-center gap-1 text-[#8b90a7] hover:text-[#e8eaf0] disabled:opacity-30 disabled:cursor-not-allowed transition-colors touch-manipulation"
+              style={{ minWidth: '68px' }}
             >
-              <RedoIcon />
-              <span className="text-[9px] font-medium leading-none">Redo</span>
+              <span className="[&>svg]:h-6 [&>svg]:w-6"><RedoIcon /></span>
+              <span className="text-[10px] font-medium leading-none">Redo</span>
             </button>
             <button
               type="button"
-              onClick={downloadImage}
+              onClick={clearCanvas}
+              title="Clear"
+              className="flex shrink-0 flex-col items-center justify-center gap-1 text-[#e05c5c] hover:text-[#f07070] transition-colors touch-manipulation"
+              style={{ minWidth: '68px' }}
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+              </svg>
+              <span className="text-[10px] font-medium leading-none">Clear</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowExportSheet(true)}
               disabled={!hasBackground}
               title="Download"
-              className="flex flex-col items-center justify-center gap-0.5 px-3 text-[#43c97e] hover:text-[#5cd68e] disabled:opacity-40 disabled:cursor-not-allowed transition-colors touch-manipulation min-w-[44px]"
+              className="flex shrink-0 flex-col items-center justify-center gap-1 text-[#43c97e] hover:text-[#5cd68e] disabled:opacity-40 disabled:cursor-not-allowed transition-colors touch-manipulation"
+              style={{ minWidth: '68px' }}
             >
-              <DownloadIcon />
-              <span className="text-[9px] font-medium leading-none">Save</span>
+              <span className="[&>svg]:h-6 [&>svg]:w-6"><DownloadIcon /></span>
+              <span className="text-[10px] font-medium leading-none">Save</span>
             </button>
+
           </div>
         </div>
+
+        {/* ── Export sheet — slides up when Save tapped ── */}
+        {showExportSheet && (
+          <>
+            <div
+              className="fixed inset-0 z-50 bg-black/50"
+              onClick={() => setShowExportSheet(false)}
+              aria-hidden="true"
+            />
+            <div className="fixed bottom-[72px] left-0 right-0 z-50 bg-[#1a1d27] rounded-t-2xl px-5 py-5 flex flex-col gap-4 shadow-2xl">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-semibold text-[#e8eaf0]">Export Options</span>
+                <button
+                  type="button"
+                  onClick={() => setShowExportSheet(false)}
+                  className="flex h-7 w-7 items-center justify-center rounded-md text-[#8b90a7] hover:text-[#e8eaf0] hover:bg-[#242736] transition-colors"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+              {exportControls}
+              <button
+                type="button"
+                onClick={() => { downloadImage(exportFormat, exportQuality / 100); setShowExportSheet(false) }}
+                className="w-full flex items-center justify-center gap-2 rounded-md bg-[#43c97e] hover:bg-[#38b36c] px-4 py-3 text-sm font-semibold text-white transition-colors touch-manipulation min-h-[48px]"
+              >
+                <span className="[&>svg]:h-5 [&>svg]:w-5"><DownloadIcon /></span>
+                Download {exportFormat.toUpperCase()}
+              </button>
+            </div>
+          </>
+        )}
+
       </div>
     </>
   )

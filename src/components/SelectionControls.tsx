@@ -27,6 +27,7 @@ interface SelectionControlsProps {
   onDuplicate: () => void
   onApplyImageFilters: (brightness: number, contrast: number, saturation: number) => void
   onSaveFilterSnapshot: () => void
+  onToggleLock: () => void
 }
 
 type AccordionSection = 'transform' | 'textStyle' | 'filters' | 'appearance'
@@ -88,6 +89,7 @@ export default function SelectionControls({
   onDuplicate,
   onApplyImageFilters,
   onSaveFilterSnapshot,
+  onToggleLock,
 }: SelectionControlsProps) {
   const isText = selectedObject instanceof fabric.IText
   const isImage = selectedObject instanceof fabric.Image
@@ -157,6 +159,9 @@ export default function SelectionControls({
   }, [selectedObject, isText, isImage])
 
   if (!selectedObject) return null
+
+  // ── Lock state detection ──────────────────────────────────────────────────
+  const isLocked = !!(selectedObject as fabric.Object & { _isLocked?: boolean })?._isLocked
 
   const handleApply = () => {
     const size = Number(fontSize)
@@ -266,6 +271,19 @@ export default function SelectionControls({
           className="w-full rounded-md bg-[#0f1117] border border-[#2e3347] hover:border-[#6c63ff]/60 px-3 py-2 text-xs text-[#e8eaf0] transition-colors touch-manipulation min-h-[40px]"
         >
           Duplicate
+        </button>
+
+        {/* Lock / Unlock (Feature 3) */}
+        <button
+          type="button"
+          onClick={onToggleLock}
+          className={`w-full rounded-md border px-3 py-2 text-xs font-medium transition-colors touch-manipulation min-h-[40px] ${
+            isLocked
+              ? 'bg-[#e05c5c]/10 border-[#e05c5c]/40 text-[#e05c5c] hover:bg-[#e05c5c]/20'
+              : 'bg-[#0f1117] border-[#2e3347] text-[#8b90a7] hover:border-[#6c63ff]/60 hover:text-[#e8eaf0]'
+          }`}
+        >
+          {isLocked ? 'Unlock Object' : 'Lock Object'}
         </button>
       </AccordionItem>
 

@@ -37,6 +37,13 @@ export default function App() {
     startCrop,
     applyCrop,
     cancelCrop,
+    nudgeActive,
+    toggleLock,
+    showGrid,
+    toggleGrid,
+    setCanvasBgSolid,
+    setCanvasBgGradient,
+    addShape,
   } = useCanvas(canvasRef)
 
   // ── Global keyboard shortcuts: Undo / Redo ─────────────────────────────
@@ -61,6 +68,22 @@ export default function App() {
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [undo, redo])
+
+  // ── Feature 1: Arrow key nudge ─────────────────────────────────────────
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) return
+      const tag = (document.activeElement as HTMLElement)?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+      e.preventDefault()
+      const step = e.shiftKey ? 10 : 1
+      const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0
+      const dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0
+      nudgeActive(dx, dy)
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [nudgeActive])
 
   return (
     <div className="flex flex-col lg:flex-row h-screen w-screen overflow-hidden bg-[#0f1117] text-[#e8eaf0]">
@@ -92,6 +115,12 @@ export default function App() {
         startCrop={startCrop}
         applyCrop={applyCrop}
         cancelCrop={cancelCrop}
+        toggleLock={toggleLock}
+        showGrid={showGrid}
+        toggleGrid={toggleGrid}
+        setCanvasBgSolid={setCanvasBgSolid}
+        setCanvasBgGradient={setCanvasBgGradient}
+        addShape={addShape}
       />
 
       {/* ── Main canvas area ────────────────────────────────────── */}
@@ -101,6 +130,7 @@ export default function App() {
         selectedObject={selectedObject}
         removeActive={removeActive}
         canvas={canvas}
+        showGrid={showGrid}
       />
     </div>
   )
