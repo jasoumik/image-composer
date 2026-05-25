@@ -2,6 +2,22 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import type { RefObject } from 'react'
 import { fabric } from 'fabric'
 
+// ── Patch Fabric IText to fix mobile last-character bug ──────────────────────
+// On iOS, exitEditing() sets isEditing=false BEFORE calling blur() on the
+// hidden textarea. The last input event fires during blur, but onInput() bails
+// early because isEditing is already false → the final character is never
+// committed. Fix: read the textarea value into the object right before exit.
+;(function patchFabricITextExitEditing() {
+  const proto = fabric.IText.prototype as fabric.IText & { updateFromTextArea?: () => void }
+  const originalExit = proto.exitEditing
+  proto.exitEditing = function (this: fabric.IText & { updateFromTextArea?: () => void; hiddenTextarea?: HTMLTextAreaElement | null }) {
+    if (this.hiddenTextarea && this.isEditing && typeof this.updateFromTextArea === 'function') {
+      this.updateFromTextArea()
+    }
+    return originalExit.call(this)
+  }
+})()
+
 // We store our custom tag directly on the object at runtime.
 // Using a WeakSet avoids polluting fabric's type system.
 const backgroundObjects = new WeakSet<fabric.Object>()
@@ -73,6 +89,9 @@ export function useCanvas(canvasRef: RefObject<HTMLCanvasElement | null>) {
   // Ref to track the bg fill gradient rect (Feature 5)
   const bgFillRectRef = useRef<fabric.Rect | null>(null)
 
+  // Smart alignment guides: stores lines to draw after each render
+  const guideLinesRef = useRef<{ x?: number; y?: number }[]>([])
+
   // ── History refs ────────────────────────────────────────────────────────
   const historyRef = useRef<string[]>([])
   const historyIndexRef = useRef<number>(-1)
@@ -101,6 +120,130 @@ export function useCanvas(canvasRef: RefObject<HTMLCanvasElement | null>) {
     fc.on('selection:created', (e) => setSelectedObject(e.selected?.[0] ?? null))
     fc.on('selection:updated', (e) => setSelectedObject(e.selected?.[0] ?? null))
     fc.on('selection:cleared', () => setSelectedObject(null))
+
+    // ── Fix: mobile IText last-letter bug ───────────────────────────────────
+    // On mobile virtual keyboards, the final character typed may not be
+    // committed before Fabric exits editing mode. Force a render + snapshot
+    // when editing exits so the text is always saved correctly.
+    fc.on('text:editing:exited', () => {
+      fc.renderAll()
+      if (!suppressSnapshotRef.current) {
+        const json = JSON.stringify(fc.toJSON(['_isBackground', '_isLocked', '_isBgFill']))
+        historyRef.current = historyRef.current.slice(0, historyIndexRef.current + 1)
+        historyRef.current.push(json)
+        if (historyRef.current.length > 30) {
+          historyRef.current.shift()
+        } else {
+          historyIndexRef.current++
+        }
+        setCanUndo(historyIndexRef.current > 0)
+        setCanRedo(false)
+        try {
+          const state = {
+            canvasJSON: json,
+            nativeWidth: nativeSizeRef.current.width,
+            nativeHeight: nativeSizeRef.current.height,
+            displayWidth: fc.getWidth(),
+            displayHeight: fc.getHeight(),
+          }
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
+        } catch { /* quota — fail silently */ }
+      }
+    })
+
+    // ── Smart alignment guides ───────────────────────────────────────────────
+    const SNAP_THRESHOLD = 8
+
+    fc.on('object:moving', (e) => {
+      const obj = e.target
+      if (!obj) return
+
+      const cw = fc.getWidth()
+      const ch = fc.getHeight()
+      const br = obj.getBoundingRect(true)
+      const objCX = br.left + br.width / 2
+      const objCY = br.top + br.height / 2
+
+      const guides: { x?: number; y?: number }[] = []
+
+      // Snap + guide: canvas horizontal center
+      if (Math.abs(objCX - cw / 2) < SNAP_THRESHOLD) {
+        guides.push({ x: cw / 2 })
+        obj.set({ left: (obj.left ?? 0) + (cw / 2 - objCX) })
+        obj.setCoords()
+      }
+
+      // Snap + guide: canvas vertical center
+      if (Math.abs(objCY - ch / 2) < SNAP_THRESHOLD) {
+        guides.push({ y: ch / 2 })
+        obj.set({ top: (obj.top ?? 0) + (ch / 2 - objCY) })
+        obj.setCoords()
+      }
+
+      // Guide: left edge
+      if (Math.abs(br.left) < SNAP_THRESHOLD) {
+        guides.push({ x: 0 })
+        obj.set({ left: (obj.left ?? 0) - br.left })
+        obj.setCoords()
+      }
+
+      // Guide: right edge
+      if (Math.abs(br.left + br.width - cw) < SNAP_THRESHOLD) {
+        guides.push({ x: cw })
+        obj.set({ left: (obj.left ?? 0) + (cw - (br.left + br.width)) })
+        obj.setCoords()
+      }
+
+      // Guide: top edge
+      if (Math.abs(br.top) < SNAP_THRESHOLD) {
+        guides.push({ y: 0 })
+        obj.set({ top: (obj.top ?? 0) - br.top })
+        obj.setCoords()
+      }
+
+      // Guide: bottom edge
+      if (Math.abs(br.top + br.height - ch) < SNAP_THRESHOLD) {
+        guides.push({ y: ch })
+        obj.set({ top: (obj.top ?? 0) + (ch - (br.top + br.height)) })
+        obj.setCoords()
+      }
+
+      guideLinesRef.current = guides
+    })
+
+    fc.on('mouse:up', () => {
+      if (guideLinesRef.current.length > 0) {
+        guideLinesRef.current = []
+        fc.renderAll()
+      }
+    })
+
+    // Draw guide lines on the canvas context after each render
+    fc.on('after:render', () => {
+      const guides = guideLinesRef.current
+      if (guides.length === 0) return
+      const ctx = fc.getContext()
+      const cw = fc.getWidth()
+      const ch = fc.getHeight()
+      ctx.save()
+      ctx.strokeStyle = '#00d4ff'
+      ctx.lineWidth = 1
+      ctx.setLineDash([6, 4])
+      ctx.globalAlpha = 0.85
+      guides.forEach((g) => {
+        ctx.beginPath()
+        if (g.x !== undefined) {
+          ctx.moveTo(g.x, 0)
+          ctx.lineTo(g.x, ch)
+        }
+        if (g.y !== undefined) {
+          ctx.moveTo(0, g.y)
+          ctx.lineTo(cw, g.y)
+        }
+        ctx.stroke()
+      })
+      ctx.restore()
+    })
 
     // NOTE: No canvas event listeners for saveSnapshot — snapshots are saved
     // explicitly at the end of each user action to avoid async race conditions
